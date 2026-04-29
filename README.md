@@ -6,14 +6,16 @@ Bu proje, [YÖKATLAS](https://yokatlas.yok.gov.tr/) verilerine erişimi kolayla�
 
 🎯 **Temel Özellikler**
 
-* YÖKATLAS verilerine programatik erişim için standart bir MCP arayüzü.
+* YÖKATLAS tercih kılavuzu JSON API'sine programatik erişim için standart bir MCP arayüzü.
 * Aşağıdaki yetenekler:
-    * **Akıllı Program Arama:** Fuzzy matching ile üniversite ve program adı arama (örn: "boğaziçi" → "BOĞAZİÇİ ÜNİVERSİTESİ")
-    * **Lisans Program Detayları:** Kontenjan, yerleşme puanları, öğrenci demografisi, akademik kadro bilgileri
-    * **Önlisans Program Detayları:** Kontenjan, yerleşme verileri, tesis bilgileri
-    * **Kapsamlı Filtreleme:** Şehir, üniversite türü, ücret durumu, öğretim türü
+    * **Birleşik Akıllı Arama:** Lisans + önlisans tek arama; fuzzy matching ile üniversite/program/il adı çözümlemesi (örn: "boğaziçi" → "BOĞAZİÇİ ÜNİVERSİTESİ")
+    * **4 Yıllık İstatistik:** Her programa ait kontenjan, yerleşen, taban puanı, başarı sırası, akademik kadro ve KPSS verileri tek seferde (current + 3 history)
+    * **Lookup Araçları:** Üniversite, program grubu ve il listelerine doğrudan erişim
+    * **Filtreleme:** Puan türü (SAY/SÖZ/EA/DİL/TYT), üniversite türü (DEVLET/VAKIF), başarı sırası aralığı, sayfalama ve sıralama
 * Claude Desktop uygulaması ile `fastmcp install` komutu (veya manuel yapılandırma) kullanılarak kolay entegrasyon.
 * YOKATLAS MCP [5ire](https://5ire.app) gibi Claude Desktop haricindeki MCP istemcilerini de destekler.
+
+> ⚠️ **v0.6.0 Breaking Change** — YÖK Atlas Nisan 2026'da React tabanlı SPA'ya geçti, eski HTML scraping endpoint'leri ve detaylı atlas verileri (cinsiyet/lise alanı dağılımı, akademisyen ünvan dağılımı, KPSS yıllara göre, vb.) site genelinden kaldırıldı. Bu MCP yeni JSON API'ye karşı yazıldı; sadece resmî API'nin sunduğu temel istatistikler döner.
 
 ---
 
@@ -112,25 +114,38 @@ Bu bölüm, YOKATLAS MCP aracını 5ire gibi Claude Desktop dışındaki MCP ist
 
 Bu FastMCP sunucusu LLM modelleri için aşağıdaki araçları sunar:
 
-### 🔍 Akıllı Arama Araçları
+### 🔍 Arama
 
-* **`search_bachelor_degree_programs`**: Lisans programları için akıllı arama (Fuzzy matching ile)
-    * **Özellikler:** Fuzzy matching ("boğaziçi" → "BOĞAZİÇİ ÜNİVERSİTESİ"), kısmi eşleştirme ("bilgisayar" → tüm bilgisayar programları)
-    * **Parametreler**: `university`, `program`, `city`, `score_type` (SAY/EA/SOZ/DIL), `university_type`, `fee_type`, `education_type`, `availability`, `results_limit`
+* **`search_programs`**: Lisans + önlisans birleşik arama (akıllı fuzzy matching).
+    * **Parametreler:**
+        * `degree_type`: `'bachelor'` (lisans) veya `'associate'` (önlisans). Boş bırakılırsa ikisi de döner.
+        * `puan_turu`: `SAY`, `SÖZ`/`SOZ`, `EA`, `DİL`/`DIL`, `TYT` (ASCII varyantlar otomatik normalize edilir).
+        * `universite`, `program`, `il`: Smart fuzzy match (örn. `"boğaziçi"`, `"bilgisayar"`, `"ankara"`).
+        * `universite_turu`: `DEVLET` veya `VAKIF`.
+        * `kilavuz_kodu`: `int` — tek programa filtre (eski "atlas detayı" use-case'i için).
+        * `min_basari_sirasi`, `max_basari_sirasi`: Başarı sırası aralığı.
+        * `page`, `size`, `sort_by`, `direction`: Sayfalama ve sıralama (default: `basariSirasi ASC`, `size=20`, max `size=500`).
+    * **Döndürülen Veri:** Her sonuç 4 yıllık istatistikleri (`current` + `history`) içerir: kontenjan, yerleşen, taban puanı, başarı sırası, KPSS skorları, akademik kadro sayıları.
 
-* **`search_associate_degree_programs`**: Önlisans programları için akıllı arama (Fuzzy matching ile)
-    * **Özellikler:** Fuzzy matching, kısmi eşleştirme, TYT puan sistemi desteği
-    * **Parametreler**: `university`, `program`, `city`, `university_type`, `fee_type`, `education_type`, `availability`, `results_limit`
+### 📚 Lookup Araçları
 
-### 📊 Atlas Detay Araçları
+* **`list_universities`**: YÖKATLAS'taki tüm üniversiteleri (`universite_id`, `universite_adi`) listeler.
+* **`list_program_groups`**: Tüm program gruplarını (`birim_grup_id`, `birim_grup_adi`, `puan_turu`) listeler — geçerli `program` filtre değerlerini keşfetmek için kullanın.
+* **`list_cities`**: 81 ili (`il_kodu`, `il_adi`) listeler.
 
-* **`get_bachelor_degree_atlas_details`**: Belirli bir lisans programının kapsamlı detaylarını getirir
-    * **Parametreler**: `yop_kodu` (Program YÖP kodu), `year` (Veri yılı: 2025, 2024, 2023)
-    * **Döndürülen Veriler**: Kontenjan, yerleşme puanları, öğrenci demografisi, akademik kadro, tesis bilgileri
+### 🔄 v0.5 → v0.6 Migration
 
-* **`get_associate_degree_atlas_details`**: Belirli bir önlisans programının kapsamlı detaylarını getirir
-    * **Parametreler**: `yop_kodu` (Program YÖP kodu), `year` (Veri yılı: 2025, 2024, 2023)
-    * **Döndürülen Veriler**: Kontenjan, yerleşme verileri, öğrenci dağılımı, akademik kadro bilgileri
+Eski API'den geçenler için kısaca:
+
+| Eski (v0.5) | Yeni (v0.6) |
+|---|---|
+| `search_bachelor_degree_programs` | `search_programs(degree_type='bachelor', ...)` |
+| `search_associate_degree_programs` | `search_programs(degree_type='associate', ...)` |
+| `get_bachelor_degree_atlas_details(yop_kodu, year)` | `search_programs(kilavuz_kodu=N)` (4 yıllık veri search içinde) |
+| `get_associate_degree_atlas_details(yop_kodu, year)` | `search_programs(kilavuz_kodu=N)` |
+| `score_type` | `puan_turu` (TYT eklendi) |
+| `fee_type` / `education_type` / `availability` | Kaldırıldı (yeni API'de doğrudan karşılığı yok) |
+| `yop_kodu` (str) | `kilavuz_kodu` (int) |
 
 ---
 

@@ -1,333 +1,333 @@
 """
-YOKATLAS MCP Server - Turkish Higher Education Atlas API
+YOKATLAS MCP Server - Turkish Higher Education Atlas API (yokatlas-py v0.6.0+)
 
-This module provides an MCP server for accessing YOKATLAS data,
-including bachelor's and associate degree program information.
+YÖK Atlas tercih kılavuzu JSON API'sine MCP üzerinden erişim sağlar.
+Lisans/önlisans programları arar, üniversite/program/il lookup tablolarını sunar.
+
+Önemli: v0.6.0 ile YÖK Atlas Nisan 2026 SPA geçişi sonrası detaylı atlas
+verileri (cinsiyet/lise alanı dağılımı, akademisyen ünvan dağılımı, KPSS
+yıllara göre, vb.) site genelinden kaldırıldığı için API tarafından da
+sunulmuyor. Search response'u her programa ait 4 yıllık (current + 3 history)
+temel istatistikleri içerir.
 """
 
+from __future__ import annotations
+
+import asyncio
+import atexit
 import logging
-from typing import Literal, Optional, List, Any
+from typing import Any, Literal
 
-from pydantic import Field
 from fastmcp import FastMCP
+from pydantic import Field
 
-# Import yokatlas-py v0.5.4+ API
-from yokatlas_py import (
-    search_lisans_programs,
-    search_onlisans_programs,
-    YOKATLASLisansAtlasi,
-    YOKATLASOnlisansAtlasi
+from yokatlas_py import AsyncYokAtlasClient, SearchFilters
+from yokatlas_py.exceptions import (
+    APIError,
+    LookupError as YokLookupError,
+    NotFoundError,
+    RateLimitError,
+    YokAtlasError,
 )
 
-# Public API exports
 __all__ = ["app", "main"]
 
-# Configure logging
 logger = logging.getLogger(__name__)
 
-# Create a FastMCP server instance
 app = FastMCP(
     name="YOKATLAS API Server",
-    instructions="MCP server for Turkish Higher Education Atlas (YOKATLAS). Provides access to university program data including bachelor's and associate degree programs with search and detailed statistics."
+    instructions=(
+        "MCP server for the Turkish Higher Education Atlas (YÖKATLAS) tercih "
+        "kılavuzu JSON API. Provides smart-search over bachelor's and "
+        "associate-degree programs (4-year stats per program) and lookup "
+        "tables for universities, program groups, and cities."
+    ),
 )
 
 
-# =============================================================================
-# Helper Functions (DRY - Don't Repeat Yourself)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Async client (lazy singleton)
+# ---------------------------------------------------------------------------
 
-def _build_search_params(
-    university: Optional[str],
-    program: Optional[str],
-    city: Optional[str],
-    university_type: str,
-    fee_type: str,
-    education_type: str,
-    availability: str,
-    results_limit: int,
-    score_type: Optional[str] = None
-) -> dict:
+_client: AsyncYokAtlasClient | None = None
+_client_lock = asyncio.Lock()
+
+
+async def _get_client() -> AsyncYokAtlasClient:
+    global _client
+    if _client is None:
+        async with _client_lock:
+            if _client is None:
+                _client = AsyncYokAtlasClient()
+    return _client
+
+
+def _cleanup_client() -> None:
+    global _client
+    if _client is None:
+        return
+    try:
+        asyncio.run(_client.aclose())
+    except RuntimeError:
+        # Event loop already closed during interpreter shutdown.
+        pass
+
+
+atexit.register(_cleanup_client)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+_DEGREE_TO_BIRIM_TURU: dict[str, int] = {"bachelor": 46, "associate": 47}
+
+
+def _format_yok_error(exc: YokAtlasError) -> dict[str, Any]:
+    """Render a yokatlas-py exception as a structured error dict."""
+    if isinstance(exc, YokLookupError):
+        return {
+            "error": "lookup_failed",
+            "details": str(exc),
+            "name": exc.name,
+            "kind": exc.kind,
+            "suggestions": exc.suggestions,
+        }
+    if isinstance(exc, RateLimitError):
+        return {
+            "error": "rate_limit",
+            "details": str(exc),
+            "status_code": exc.status_code,
+        }
+    if isinstance(exc, NotFoundError):
+        return {
+            "error": "not_found",
+            "details": str(exc),
+            "status_code": exc.status_code,
+        }
+    if isinstance(exc, APIError):
+        return {
+            "error": "api_error",
+            "details": str(exc),
+            "status_code": exc.status_code,
+            "body": exc.body,
+        }
+    return {"error": "yokatlas_error", "details": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# Tools
+# ---------------------------------------------------------------------------
+
+
+@app.tool()
+async def search_programs(
+    degree_type: Literal["bachelor", "associate"] | None = Field(
+        default=None,
+        description=(
+            "Program level: 'bachelor' (lisans, birim_turu_id=46) or "
+            "'associate' (önlisans, birim_turu_id=47). Omit to return both."
+        ),
+    ),
+    puan_turu: Literal["SAY", "SÖZ", "EA", "DİL", "TYT", "SOZ", "DIL"] | None = Field(
+        default=None,
+        description=(
+            "Score type. SAY (Science), SÖZ/SOZ (Verbal), EA (Equal Weight), "
+            "DİL/DIL (Language), TYT (basic placement, used for associate "
+            "degree). ASCII variants (SOZ/DIL) are auto-normalized."
+        ),
+    ),
+    universite: str | None = Field(
+        default=None,
+        description=(
+            "University name with smart fuzzy matching (e.g. 'boğaziçi' → "
+            "'BOĞAZİÇİ ÜNİVERSİTESİ'). Turkish-aware normalization."
+        ),
+    ),
+    program: str | None = Field(
+        default=None,
+        description=(
+            "Program group name with smart fuzzy matching (e.g. 'bilgisayar' "
+            "→ 'Bilgisayar Mühendisliği'). Matches the program-group field."
+        ),
+    ),
+    il: str | None = Field(
+        default=None,
+        description="City name with smart fuzzy matching (e.g. 'ankara').",
+    ),
+    universite_turu: Literal["DEVLET", "VAKIF"] | None = Field(
+        default=None,
+        description="University type: DEVLET (state) or VAKIF (foundation).",
+    ),
+    kilavuz_kodu: int | None = Field(
+        default=None,
+        description=(
+            "ÖSYM kılavuz kodu — filters to a single program. Use this for "
+            "single-program lookup (e.g. 102210277)."
+        ),
+    ),
+    min_basari_sirasi: int | None = Field(
+        default=None,
+        description="Minimum success ranking (lower bound, inclusive).",
+    ),
+    max_basari_sirasi: int | None = Field(
+        default=None,
+        description="Maximum success ranking (upper bound, inclusive).",
+    ),
+    page: int = Field(
+        default=0,
+        ge=0,
+        description="Page number, 0-indexed.",
+    ),
+    size: int = Field(
+        default=20,
+        ge=1,
+        le=500,
+        description="Page size (max 500).",
+    ),
+    sort_by: str = Field(
+        default="basariSirasi",
+        description=(
+            "Sort field (camelCase). Common values: basariSirasi, minPuan, "
+            "kontenjan, gkY (yerleşen)."
+        ),
+    ),
+    direction: Literal["ASC", "DESC"] = Field(
+        default="ASC",
+        description="Sort direction.",
+    ),
+) -> dict[str, Any]:
     """
-    Build search parameters dictionary for YOKATLAS API.
+    Search YÖKATLAS programs with smart fuzzy matching across the whole
+    tercih kılavuzu (lisans + önlisans).
 
-    Args:
-        university: University name filter
-        program: Program name filter
-        city: City filter
-        university_type: University type filter
-        fee_type: Fee type filter
-        education_type: Education type filter
-        availability: Availability filter
-        results_limit: Maximum results to return
-        score_type: Score type filter (only for bachelor programs)
+    Each result already contains 4-year statistics (current year + 3
+    historical years): kontenjan, yerlesen, min_puan, basari_sirasi,
+    KPSS scores, academic-staff counts.
 
-    Returns:
-        Dictionary of search parameters for yokatlas-py API
+    Use `kilavuz_kodu` to fetch a single program.
     """
-    params: dict[str, Any] = {}
+    filter_kwargs: dict[str, Any] = {}
 
-    if university:
-        params['universite'] = university
-    if program:
-        params['program'] = program
-    if city:
-        params['sehir'] = city
-    if score_type:
-        params['puan_turu'] = score_type.lower()
-    if university_type:
-        params['universite_turu'] = university_type
-    if fee_type:
-        params['ucret'] = fee_type
-    if education_type:
-        params['ogretim_turu'] = education_type
-    if availability:
-        params['doluluk'] = availability
-    if results_limit:
-        params['length'] = results_limit
+    if degree_type is not None:
+        filter_kwargs["birim_turu_id"] = _DEGREE_TO_BIRIM_TURU[degree_type]
+    if puan_turu is not None:
+        filter_kwargs["puan_turu"] = puan_turu
+    if universite is not None:
+        filter_kwargs["universite"] = universite
+    if program is not None:
+        filter_kwargs["program"] = program
+    if il is not None:
+        filter_kwargs["il"] = il
+    if universite_turu is not None:
+        filter_kwargs["universite_turu"] = universite_turu
+    if kilavuz_kodu is not None:
+        filter_kwargs["kilavuz_kodu"] = kilavuz_kodu
+    if min_basari_sirasi is not None:
+        filter_kwargs["min_basari_sirasi"] = min_basari_sirasi
+    if max_basari_sirasi is not None:
+        filter_kwargs["max_basari_sirasi"] = max_basari_sirasi
 
-    return params
+    try:
+        filters = SearchFilters(**filter_kwargs)
+    except Exception as exc:
+        logger.warning("Invalid search filters: %s", exc)
+        return {"error": "invalid_filters", "details": str(exc)}
+
+    try:
+        client = await _get_client()
+        result_page = await client.search(
+            filters,
+            page=page,
+            size=size,
+            sort_by=sort_by,
+            direction=direction,
+        )
+        return result_page.model_dump(mode="json")
+    except YokAtlasError as exc:
+        logger.warning("YÖKATLAS error in search_programs: %s", exc)
+        return _format_yok_error(exc)
+    except Exception as exc:
+        logger.exception("Unexpected error in search_programs")
+        return {"error": "internal_error", "details": str(exc)}
 
 
-def _execute_search(
-    search_func: callable,
-    params: dict,
-    program_type: str,
-    search_context: dict
-) -> dict:
+@app.tool()
+async def list_universities() -> dict[str, Any]:
     """
-    Execute a search and format the results.
+    List all universities known to YÖKATLAS (≈221 entries).
 
-    Args:
-        search_func: The search function to call (search_lisans_programs or search_onlisans_programs)
-        params: Search parameters dictionary
-        program_type: Type of program ('bachelor' or 'associate_degree')
-        search_context: Context info for error reporting (university, program, city)
-
-    Returns:
-        Formatted search results dictionary
+    Returns each university's `universite_id` (int) and `universite_adi`
+    (str). Useful for resolving fuzzy university names to IDs or for
+    populating UI selectors.
     """
     try:
-        results = search_func(params, smart_search=True)
-
-        # Handle error response from API
-        if isinstance(results, dict) and 'error' in results:
-            logger.warning(f"API returned error for {program_type} search: {results.get('error')}")
-            return results
-
-        # Format successful results
-        response = {
-            "programs": results if isinstance(results, list) else [],
-            "total_found": len(results) if isinstance(results, list) else 0,
-            "search_method": "smart_search_v0.5.4",
-            "fuzzy_matching": True
-        }
-
-        if program_type == "associate_degree":
-            response["program_type"] = "associate_degree"
-
-        return response
-
-    except ValueError as e:
-        logger.error(f"Invalid parameter in {program_type} search: {e}")
+        client = await _get_client()
+        unis = await client.list_universities()
         return {
-            "error": "Invalid search parameter",
-            "details": str(e),
-            "search_method": "smart_search_v0.5.4",
-            "parameters_used": search_context
+            "count": len(unis),
+            "universities": [u.model_dump(mode="json") for u in unis],
         }
-    except ConnectionError as e:
-        logger.error(f"Connection error in {program_type} search: {e}")
-        return {
-            "error": "Connection error to YOKATLAS",
-            "details": str(e),
-            "search_method": "smart_search_v0.5.4",
-            "parameters_used": search_context
-        }
-    except Exception as e:
-        logger.exception(f"Unexpected error in {program_type} search")
-        return {
-            "error": "Internal error",
-            "details": str(e),
-            "search_method": "smart_search_v0.5.4",
-            "parameters_used": search_context
-        }
+    except YokAtlasError as exc:
+        logger.warning("YÖKATLAS error in list_universities: %s", exc)
+        return _format_yok_error(exc)
+    except Exception as exc:
+        logger.exception("Unexpected error in list_universities")
+        return {"error": "internal_error", "details": str(exc)}
 
 
-async def _fetch_atlas_details(
-    atlas_class: type,
-    yop_kodu: str,
-    year: int,
-    program_type: str
-) -> dict:
+@app.tool()
+async def list_program_groups() -> dict[str, Any]:
     """
-    Fetch detailed atlas information for a program.
+    List all program groups (birim grupları) — i.e. the canonical program
+    names used in YÖKATLAS (e.g. 'Bilgisayar Mühendisliği', 'Tıp').
 
-    Args:
-        atlas_class: Atlas class to use (YOKATLASLisansAtlasi or YOKATLASOnlisansAtlasi)
-        yop_kodu: Program YOP code
-        year: Data year
-        program_type: Type of program for logging
-
-    Returns:
-        Atlas details dictionary or error dictionary
+    Each entry has `birim_grup_id` (int), `birim_grup_adi` (str), and
+    `puan_turu` (str). Useful for discovering valid program filter values.
     """
     try:
-        atlas = atlas_class({'program_id': yop_kodu, 'year': year})
-        result = await atlas.fetch_all_details()
-        return result
-    except ValueError as e:
-        logger.error(f"Invalid parameter for {program_type} atlas: {e}")
-        return {"error": "Invalid parameter", "details": str(e), "program_id": yop_kodu, "year": year}
-    except ConnectionError as e:
-        logger.error(f"Connection error fetching {program_type} atlas: {e}")
-        return {"error": "Connection error to YOKATLAS", "details": str(e), "program_id": yop_kodu, "year": year}
-    except Exception as e:
-        logger.exception(f"Unexpected error fetching {program_type} atlas details")
-        return {"error": "Internal error", "details": str(e), "program_id": yop_kodu, "year": year}
-
-
-# =============================================================================
-# MCP Tools
-# =============================================================================
-
-@app.tool()
-async def get_associate_degree_atlas_details(
-    yop_kodu: str = Field(description="Program YÖP code (e.g., '120910060') - unique identifier for the associate degree program"),
-    year: int = Field(description="Data year for statistics (e.g., 2025, 2024, 2023)", ge=2020, le=2030)
-) -> dict:
-    """
-    Get comprehensive details for a specific associate degree program from YOKATLAS Atlas.
-
-    Parameters:
-    - yop_kodu (str): Program YÖP code (e.g., '120910060')
-    - year (int): Data year (e.g., 2025, 2024, 2023)
-
-    Returns detailed information including:
-    - General program information and statistics
-    - Quota, placement, and score data
-    - Student demographics and distribution
-    - Academic staff and facility information
-    - Historical placement trends
-    """
-    return await _fetch_atlas_details(YOKATLASOnlisansAtlasi, yop_kodu, year, "associate_degree")
+        client = await _get_client()
+        groups = await client.list_program_groups()
+        return {
+            "count": len(groups),
+            "program_groups": [g.model_dump(mode="json") for g in groups],
+        }
+    except YokAtlasError as exc:
+        logger.warning("YÖKATLAS error in list_program_groups: %s", exc)
+        return _format_yok_error(exc)
+    except Exception as exc:
+        logger.exception("Unexpected error in list_program_groups")
+        return {"error": "internal_error", "details": str(exc)}
 
 
 @app.tool()
-async def get_bachelor_degree_atlas_details(
-    yop_kodu: str = Field(description="Program YÖP code (e.g., '102210277') - unique identifier for the bachelor's degree program"),
-    year: int = Field(description="Data year for statistics (e.g., 2025, 2024, 2023)", ge=2020, le=2030)
-) -> dict:
+async def list_cities() -> dict[str, Any]:
     """
-    Get comprehensive details for a specific bachelor's degree program from YOKATLAS Atlas.
+    List all Turkish cities (iller) recognized by YÖKATLAS.
 
-    Parameters:
-    - yop_kodu (str): Program YÖP code (e.g., '102210277')
-    - year (int): Data year (e.g., 2025, 2024, 2023)
-
-    Returns detailed information including:
-    - General program information and statistics
-    - Quota, placement, and score data
-    - Student demographics and distribution
-    - Academic staff and facility information
-    - Historical placement trends
+    Each entry has `il_kodu` (int) and `il_adi` (str).
     """
-    return await _fetch_atlas_details(YOKATLASLisansAtlasi, yop_kodu, year, "bachelor")
+    try:
+        client = await _get_client()
+        cities = await client.list_cities()
+        return {
+            "count": len(cities),
+            "cities": [c.model_dump(mode="json") for c in cities],
+        }
+    except YokAtlasError as exc:
+        logger.warning("YÖKATLAS error in list_cities: %s", exc)
+        return _format_yok_error(exc)
+    except Exception as exc:
+        logger.exception("Unexpected error in list_cities")
+        return {"error": "internal_error", "details": str(exc)}
 
 
-@app.tool()
-def search_bachelor_degree_programs(
-    university: Optional[str] = Field(default='', description="University name with fuzzy matching support (e.g., 'boğaziçi' → 'BOĞAZİÇİ ÜNİVERSİTESİ')"),
-    program: Optional[str] = Field(default='', description="Program/department name with partial matching (e.g., 'bilgisayar' finds all computer programs)"),
-    city: Optional[str] = Field(default='', description="City name where the university is located"),
-    score_type: Literal['SAY', 'EA', 'SOZ', 'DIL'] = Field(default='SAY', description="Score type: SAY (Science), EA (Equal Weight), SOZ (Verbal), DIL (Language)"),
-    university_type: Literal['', 'Devlet', 'Vakıf', 'KKTC', 'Yurt Dışı'] = Field(default='', description="University type: Devlet (State), Vakıf (Foundation), KKTC (TRNC), Yurt Dışı (International)"),
-    fee_type: Literal['', 'Ücretsiz', 'Ücretli', 'İÖ-Ücretli', 'Burslu', '%50 İndirimli', '%25 İndirimli', 'AÖ-Ücretli', 'UÖ-Ücretli'] = Field(default='', description="Fee status: Ücretsiz (Free), Ücretli (Paid), İÖ-Ücretli (Evening-Paid), Burslu (Scholarship), İndirimli (Discounted), AÖ-Ücretli (Open Education-Paid), UÖ-Ücretli (Distance Learning-Paid)"),
-    education_type: Literal['', 'Örgün', 'İkinci', 'Açıköğretim', 'Uzaktan'] = Field(default='', description="Education type: Örgün (Regular), İkinci (Evening), Açıköğretim (Open Education), Uzaktan (Distance Learning)"),
-    availability: Literal['', 'Doldu', 'Doldu#', 'Dolmadı', 'Yeni'] = Field(default='', description="Program availability: Doldu (Filled), Doldu# (Filled with conditions), Dolmadı (Not filled), Yeni (New program)"),
-    results_limit: int = Field(default=50, ge=1, le=500, description="Maximum number of results to return")
-) -> dict:
-    """
-    Search for bachelor's degree programs with smart fuzzy matching and user-friendly parameters.
-
-    Smart Features:
-    - Fuzzy university name matching (e.g., "boğaziçi" → "BOĞAZİÇİ ÜNİVERSİTESİ")
-    - Partial program name matching (e.g., "bilgisayar" finds all computer programs)
-    - Intelligent parameter normalization
-    - Type-safe validation
-
-    Parameters:
-    - university: University name (fuzzy matching supported)
-    - program: Program/department name (partial matching supported)
-    - city: City name
-    - score_type: Score type (SAY, EA, SOZ, DIL)
-    - university_type: Type of university (Devlet, Vakıf, etc.)
-    - fee_type: Fee/scholarship information
-    - education_type: Type of education (Örgün, İkinci, etc.)
-    - results_limit: Maximum number of results to return
-    """
-    params = _build_search_params(
-        university=university,
-        program=program,
-        city=city,
-        university_type=university_type,
-        fee_type=fee_type,
-        education_type=education_type,
-        availability=availability,
-        results_limit=results_limit,
-        score_type=score_type
-    )
-
-    search_context = {"university": university, "program": program, "city": city}
-    return _execute_search(search_lisans_programs, params, "bachelor", search_context)
+# ---------------------------------------------------------------------------
+# Entrypoint
+# ---------------------------------------------------------------------------
 
 
-@app.tool()
-def search_associate_degree_programs(
-    university: Optional[str] = Field(default='', description="University name with fuzzy matching support (e.g., 'anadolu' → 'ANADOLU ÜNİVERSİTESİ')"),
-    program: Optional[str] = Field(default='', description="Program name with partial matching (e.g., 'turizm' finds all tourism programs)"),
-    city: Optional[str] = Field(default='', description="City name where the university is located"),
-    university_type: Literal['', 'Devlet', 'Vakıf', 'KKTC', 'Yurt Dışı'] = Field(default='', description="University type: Devlet (State), Vakıf (Foundation), KKTC (TRNC), Yurt Dışı (International)"),
-    fee_type: Literal['', 'Ücretsiz', 'Ücretli', 'İÖ-Ücretli', 'Burslu', '%50 İndirimli', '%25 İndirimli', 'AÖ-Ücretli', 'UÖ-Ücretli'] = Field(default='', description="Fee status: Ücretsiz (Free), Ücretli (Paid), İÖ-Ücretli (Evening-Paid), Burslu (Scholarship), İndirimli (Discounted), AÖ-Ücretli (Open Education-Paid), UÖ-Ücretli (Distance Learning-Paid)"),
-    education_type: Literal['', 'Örgün', 'İkinci', 'Açıköğretim', 'Uzaktan'] = Field(default='', description="Education type: Örgün (Regular), İkinci (Evening), Açıköğretim (Open Education), Uzaktan (Distance Learning)"),
-    availability: Literal['', 'Doldu', 'Doldu#', 'Dolmadı', 'Yeni'] = Field(default='', description="Program availability: Doldu (Filled), Doldu# (Filled with conditions), Dolmadı (Not filled), Yeni (New program)"),
-    results_limit: int = Field(default=50, ge=1, le=500, description="Maximum number of results to return")
-) -> dict:
-    """
-    Search for associate degree (önlisans) programs with smart fuzzy matching and user-friendly parameters.
-
-    Smart Features:
-    - Fuzzy university name matching (e.g., "anadolu" → "ANADOLU ÜNİVERSİTESİ")
-    - Partial program name matching (e.g., "turizm" finds all tourism programs)
-    - Intelligent parameter normalization
-    - Type-safe validation
-
-    Parameters:
-    - university: University name (fuzzy matching supported)
-    - program: Program/department name (partial matching supported)
-    - city: City name
-    - university_type: Type of university (Devlet, Vakıf, etc.)
-    - fee_type: Fee/scholarship information
-    - education_type: Type of education (Örgün, İkinci, etc.)
-    - results_limit: Maximum number of results to return
-
-    Note: Associate degree programs use TYT scores, not SAY/EA/SOZ/DIL like bachelor programs.
-    """
-    params = _build_search_params(
-        university=university,
-        program=program,
-        city=city,
-        university_type=university_type,
-        fee_type=fee_type,
-        education_type=education_type,
-        availability=availability,
-        results_limit=results_limit
-    )
-
-    search_context = {"university": university, "program": program, "city": city}
-    return _execute_search(search_onlisans_programs, params, "associate_degree", search_context)
-
-
-def main():
+def main() -> None:
     """Main entry point for the YOKATLAS MCP server."""
     app.run()
 
