@@ -1436,21 +1436,21 @@ dependencies = [
 requires-dist = [
     { name = "fastmcp", specifier = ">=2.10.5" },
     { name = "setuptools", specifier = ">=80.9.0" },
-    { name = "yokatlas-py", specifier = ">=0.6.0" },
+    { name = "yokatlas-py", specifier = ">=0.7.0" },
 ]
 
 [[package]]
 name = "yokatlas-py"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fb/88/ea81c9274d827b7457367540a0e62fef88248a2e95de49f10e536cba5296/yokatlas_py-0.6.0.tar.gz", hash = "sha256:c4ffa481f1aec9dc6c5b3923944d808354783a6e2e8095f1c451915315b46ea9", size = 19237, upload-time = "2026-04-29T21:40:07.347Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/50/d17adc665e233090dd761013b65de86db23f342d59d10af0f2fa9bd341a9/yokatlas_py-0.7.0.tar.gz", hash = "sha256:55adc7565f311ebf075e494fd1fbd2853dbc72ef52a0a70c3d7979b55a255e33", size = 21757, upload-time = "2026-07-23T16:27:16.536Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/70/0b/b8168a180d3c21a4a3434c905ac719b88204ddf1568920a6989270293b2f/yokatlas_py-0.6.0-py3-none-any.whl", hash = "sha256:c4a1a3a3af2f35e3d606e5de875437c1356f8025c2fe3cb0793ad1dfe22566a2", size = 15954, upload-time = "2026-04-29T21:40:05.973Z" },
+    { url = "https://files.pythonhosted.org/packages/71/ad/cd16974fcda4e371ed7acbe03ce83e73dfca9bddf2fc4ba63766050930a9/yokatlas_py-0.7.0-py3-none-any.whl", hash = "sha256:904945f6dc7fa8eb84ff3d3778aca32dec91b8ee6ef9af918c96bdf331951873", size = 17408, upload-time = "2026-07-23T16:27:15.102Z" },
 ]
 
 [[package]]

@@ -10,6 +10,7 @@ Bu proje, [YÖKATLAS](https://yokatlas.yok.gov.tr/) verilerine erişimi kolayla�
 * Aşağıdaki yetenekler:
     * **Birleşik Akıllı Arama:** Lisans + önlisans tek arama; fuzzy matching ile üniversite/program/il adı çözümlemesi (örn: "boğaziçi" → "BOĞAZİÇİ ÜNİVERSİTESİ")
     * **4 Yıllık İstatistik:** Her programa ait kontenjan, yerleşen, taban puanı, başarı sırası, akademik kadro ve KPSS verileri tek seferde (current + 3 history)
+    * **Net Sihirbazı:** Son yerleşen kişinin ders bazında net sayıları (TYT/AYT/YDT), taban puan, OBP ve katsayı
     * **Lookup Araçları:** Üniversite, program grubu ve il listelerine doğrudan erişim
     * **Filtreleme:** Puan türü (SAY/SÖZ/EA/DİL/TYT), üniversite türü (DEVLET/VAKIF), başarı sırası aralığı, sayfalama ve sıralama
 * Claude Desktop uygulaması ile `fastmcp install` komutu (veya manuel yapılandırma) kullanılarak kolay entegrasyon.
@@ -126,6 +127,16 @@ Bu FastMCP sunucusu LLM modelleri için aşağıdaki araçları sunar:
         * `min_basari_sirasi`, `max_basari_sirasi`: Başarı sırası aralığı.
         * `page`, `size`, `sort_by`, `direction`: Sayfalama ve sıralama (default: `basariSirasi ASC`, `size=20`, max `size=500`).
     * **Döndürülen Veri:** Her sonuç 4 yıllık istatistikleri (`current` + `history`) içerir: kontenjan, yerleşen, taban puanı, başarı sırası, KPSS skorları, akademik kadro sayıları.
+
+* **`search_netler`**: Net Sihirbazı — son yerleşen kişinin ders bazında net sayıları.
+    * **Parametreler:**
+        * `universite`, `program`: Smart fuzzy match (tekil değer, liste değil). `program` çözümlendiğinde, `puan_turu` açıkça belirtilmemişse eşleşen program grubundan otomatik doldurulur.
+        * `puan_turu`: `SAY`, `SÖZ`/`SOZ`, `EA`, `DİL`/`DIL`, `TYT`.
+        * `universite_turu`: `DEVLET` veya `VAKIF`.
+        * `yil`: Belirli bir yıla filtrele (örn. `2024`).
+        * `katsayi`: Puan hesaplamasında kullanılan katsayıya göre filtrele.
+        * `page`, `size`: Sayfalama (default: `size=20`, max `size=500`).
+    * **Döndürülen Veri:** `puan_turu`'ye göre değişen net alanları (TYT her zaman var; SAY/SÖZ/EA/DİL kendi AYT/YDT alanlarını ekler), ayrıca `katsayi`, `taban_puan`, `obp`.
 
 ### 📚 Lookup Araçları
 

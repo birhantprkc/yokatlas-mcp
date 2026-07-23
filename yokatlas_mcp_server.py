@@ -1,8 +1,9 @@
 """
-YOKATLAS MCP Server - Turkish Higher Education Atlas API (yokatlas-py v0.6.0+)
+YOKATLAS MCP Server - Turkish Higher Education Atlas API (yokatlas-py v0.7.0+)
 
 YÖK Atlas tercih kılavuzu JSON API'sine MCP üzerinden erişim sağlar.
 Lisans/önlisans programları arar, üniversite/program/il lookup tablolarını sunar.
+Ayrıca Net Sihirbazı (son yerleşen kişinin netleri) endpoint'ini de sunar.
 
 Önemli: v0.6.0 ile YÖK Atlas Nisan 2026 SPA geçişi sonrası detaylı atlas
 verileri (cinsiyet/lise alanı dağılımı, akademisyen ünvan dağılımı, KPSS
@@ -21,7 +22,7 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from pydantic import Field
 
-from yokatlas_py import AsyncYokAtlasClient, SearchFilters
+from yokatlas_py import AsyncYokAtlasClient, NetFilters, SearchFilters
 from yokatlas_py.exceptions import (
     APIError,
     LookupError as YokLookupError,
@@ -39,8 +40,9 @@ app = FastMCP(
     instructions=(
         "MCP server for the Turkish Higher Education Atlas (YÖKATLAS) tercih "
         "kılavuzu JSON API. Provides smart-search over bachelor's and "
-        "associate-degree programs (4-year stats per program) and lookup "
-        "tables for universities, program groups, and cities."
+        "associate-degree programs (4-year stats per program), Net Sihirbazı "
+        "(last-placed candidate's exam net counts) search, and lookup tables "
+        "for universities, program groups, and cities."
     ),
 )
 
@@ -249,6 +251,98 @@ async def search_programs(
         return _format_yok_error(exc)
     except Exception as exc:
         logger.exception("Unexpected error in search_programs")
+        return {"error": "internal_error", "details": str(exc)}
+
+
+@app.tool()
+async def search_netler(
+    universite: str | None = Field(
+        default=None,
+        description=(
+            "University name with smart fuzzy matching (e.g. 'boğaziçi' → "
+            "'BOĞAZİÇİ ÜNİVERSİTESİ')."
+        ),
+    ),
+    program: str | None = Field(
+        default=None,
+        description=(
+            "Program group name with smart fuzzy matching (e.g. 'bilgisayar' "
+            "→ 'Bilgisayar Mühendisliği'). When resolved, also defaults "
+            "`puan_turu` from the matched program if not explicitly set."
+        ),
+    ),
+    puan_turu: Literal["SAY", "SÖZ", "EA", "DİL", "TYT", "SOZ", "DIL"] | None = Field(
+        default=None,
+        description=(
+            "Score type. SAY (Science), SÖZ/SOZ (Verbal), EA (Equal Weight), "
+            "DİL/DIL (Language), TYT (basic placement). ASCII variants "
+            "(SOZ/DIL) are auto-normalized."
+        ),
+    ),
+    universite_turu: Literal["DEVLET", "VAKIF"] | None = Field(
+        default=None,
+        description="University type: DEVLET (state) or VAKIF (foundation).",
+    ),
+    yil: int | None = Field(
+        default=None,
+        description="Filter to a specific year (e.g. 2024).",
+    ),
+    katsayi: float | None = Field(
+        default=None,
+        description="Filter by the coefficient (katsayı) applied to the score.",
+    ),
+    page: int = Field(
+        default=0,
+        ge=0,
+        description="Page number, 0-indexed.",
+    ),
+    size: int = Field(
+        default=20,
+        ge=1,
+        le=500,
+        description="Page size (max 500).",
+    ),
+) -> dict[str, Any]:
+    """
+    Search the Net Sihirbazı: the last-placed candidate's exam net counts
+    (son yerleşen kişinin netleri) per program/university/year.
+
+    Which `*_net` fields are populated depends on `puan_turu`: TYT fields
+    (tyt_trk_net, tyt_sos_net, tyt_mat_net, tyt_fen_net) are always present;
+    SAY adds ayt_mat/fiz/kim/bio_net; SÖZ adds ayt_tde/trh1/cog1/trh2/cog2/
+    fel/din_net; EA adds a subset of both; DİL adds ydt_ydil_net. Also
+    returns katsayi, taban_puan, and obp (orta öğretim başarı puanı).
+    """
+    filter_kwargs: dict[str, Any] = {}
+
+    if universite is not None:
+        filter_kwargs["universite"] = universite
+    if program is not None:
+        filter_kwargs["program"] = program
+    if puan_turu is not None:
+        filter_kwargs["puan_turu"] = puan_turu
+    if universite_turu is not None:
+        filter_kwargs["universite_turu"] = universite_turu
+    if yil is not None:
+        filter_kwargs["yil"] = yil
+    if katsayi is not None:
+        filter_kwargs["katsayi"] = katsayi
+
+    try:
+        filters = NetFilters(**filter_kwargs)
+    except Exception as exc:
+        logger.warning("Invalid net filters: %s", exc)
+        return {"error": "invalid_filters", "details": str(exc)}
+
+    try:
+        client = await _get_client()
+        result_page = await client.search_netler(filters, page=page, size=size)
+        return result_page.model_dump(mode="json")
+    except YokAtlasError as exc:
+        logger.warning("YÖKATLAS error in search_netler: %s", exc)
+        return _format_yok_error(exc)
+    except Exception as exc:
+        logger.exception("Unexpected error in search_netler")
         return {"error": "internal_error", "details": str(exc)}
 
 
